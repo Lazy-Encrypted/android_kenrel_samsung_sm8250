@@ -1,0 +1,114 @@
+name: Build Kernel (S20 FE - r8q)
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Region config (leave empty for default)"
+        required: false
+        default: ""
+      permissive:
+        description: "Force SELinux permissive"
+        required: false
+        default: "false"
+        type: boolean
+      include_ksu:
+        description: "Include KernelSU defconfig fragment"
+        required: false
+        default: "false"
+        type: boolean
+  push:
+    branches:
+      - sixteen
+    paths-ignore:
+      - "**.md"
+
+env:
+  MODEL: r8q
+  CLANG_VERSION: clang-r530567
+  CLANG_BRANCH: main-kernel-build-2024
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex \
+            git libssl-dev libelf-dev rsync python3 \
+            zip cpio kmod
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ env.MODEL }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ env.MODEL }}-${{ github.ref_name }}-
+            ccache-${{ env.MODEL }}-
+
+      - name: Cache AOSP Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/../toolchain
+          key: clang-${{ env.CLANG_VERSION }}
+
+      - name: Download AOSP Clang toolchain
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "${{ github.workspace }}/../toolchain/clang"
+          cd "${{ github.workspace }}/../toolchain/clang"
+          curl -LSs -o clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/${CLANG_BRANCH}/${CLANG_VERSION}.tar.gz"
+          tar -xzf clang.tar.gz
+          rm clang.tar.gz
+
+      - name: Set executable permissions
+        run: chmod +x build.sh
+
+      - name: Verify LLVM toolchain
+        run: |
+          export PATH="${{ github.workspace }}/../toolchain/clang/bin:$PATH"
+          clang --version
+          ld.lld --version
+          llvm-ar --version
+
+      - name: Configure ccache
+        run: |
+          ccache --max-size=2G
+          ccache --zero-stats
+
+      - name: Build kernel
+        env:
+          MODEL: ${{ env.MODEL }}
+          REGION: ${{ github.event.inputs.region }}
+          PERMISSIVE: ${{ github.event.inputs.permissive }}
+          INCLUDE_KSU: ${{ github.event.inputs.include_ksu }}
+          TOOLCHAIN_DIR: ${{ github.workspace }}/../toolchain/clang/bin
+        run: ./build.sh
+
+      - name: Show ccache stats
+        run: ccache --show-stats
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ env.MODEL }}-${{ github.sha }}
+          path: |
+            out/Image
+            out/dtb.img
+            out/dtbo.img
+          retention-days: 14
+          if-no-files-found: error
